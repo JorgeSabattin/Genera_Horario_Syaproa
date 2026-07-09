@@ -441,6 +441,7 @@ function filasDesdeProgramacionAcademica(aoa, found){
   const iRut        = idxCol(hdrNorm, ["RUT PROFESOR","RUT"]);
   const iSala       = idxCol(hdrNorm, ["SALA"]);
   const iVacantes   = idxCol(hdrNorm, ["VACANTES"]);
+  const iInscritos  = idxCol(hdrNorm, ["INSCRITOS"]);
   const iRestric    = idxCol(hdrNorm, ["RESTRIC. COD.PROGRAMA","RESTRIC COD PROGRAMA","RESTRIC. COD. PROGRAMA","RESTRIC.COD.PROGRAMA"]);
   const iNombreAsig = idxCol(hdrNorm, ["NOMBRE ASIGNATURA"]);
   if(iNRC<0 || iHorario<0 || (iCodigo<0 && (iMateria<0 || iCurso<0))){
@@ -468,6 +469,7 @@ function filasDesdeProgramacionAcademica(aoa, found){
       RUT_PROF: iRut>=0 ? String(row[iRut]??"").trim() : "",
       ROOM_CODE: iSala>=0 ? String(row[iSala]??"").trim() : "",
       CUPOS: iVacantes>=0 ? row[iVacantes] : "",
+      INSCRITOS: iInscritos>=0 ? row[iInscritos] : "",
       RESTRICCIONES_PROGRAMA: iRestric>=0 ? String(row[iRestric]??"") : "",
       NOMBRE_CURSO: iNombreAsig>=0 ? String(row[iNombreAsig]??"") : ""
     });
@@ -601,13 +603,17 @@ function etiquetaDeFila(row){
   const rut  = formatRut(row.RUT_PROF);
   const sala = String(row.ROOM_CODE||"").trim();
   const cupos= String(row.CUPOS||"").trim();
+  const inscritos = String(row.INSCRITOS??"").trim();
 
   let main = nrc ? `${code}, ${secc}, NRC ${nrc}, ${tipo}` : `${code}, ${secc}, ${tipo}`;
   const extras = [];
   if(prof) extras.push(rut ? `${prof} (${rut})` : prof);
   if(sala) extras.push(sala);
   let tail = extras.length ? ", "+extras.join(", ") : "";
-  if(cupos) tail += ` (Cupos: ${cupos})`;
+  const ocupacion = [];
+  if(cupos!=="") ocupacion.push(`Cupos: ${cupos}`);
+  if(inscritos!=="") ocupacion.push(`Inscritos: ${inscritos}`);
+  if(ocupacion.length) tail += ` (${ocupacion.join(", ")})`;
   return main + tail;
 }
 
