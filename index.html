@@ -354,11 +354,30 @@ function tipoActividad(v){
   if(u.includes("TEA")) return "TEA";
   return u.slice(0,3) || "TEO";
 }
+// Nombre completo -> "Primer nombre + Primer apellido", en formato Título.
+// Convención chilena: los últimos 2 tokens son apellidos (paterno/materno) y
+// todo lo anterior son nombres; se descarta el 2° nombre y el 2° apellido.
+// Con 2 tokens se asume "nombre apellido" tal cual; con 1, se deja igual.
+function tituloPalabra(w){
+  return w.toLowerCase().replace(/(^|[-'])\p{L}/gu, m=>m.toUpperCase());
+}
 function abreviarProf(nombre){
   if(!nombre) return "";
-  const p = String(nombre).trim().split(/\s+/);
-  if(p.length===1) return p[0];
-  return p[0][0].toUpperCase() + ". " + p[1][0].toUpperCase() + p[1].slice(1).toLowerCase();
+  const p = String(nombre).trim().split(/\s+/).filter(Boolean);
+  if(!p.length) return "";
+  if(p.length===1) return tituloPalabra(p[0]);
+  const primerNombre   = p[0];
+  const primerApellido = p.length>=3 ? p[p.length-2] : p[p.length-1];
+  return tituloPalabra(primerNombre) + " " + tituloPalabra(primerApellido);
+}
+// Formatea un RUT chileno (solo dígitos, con o sin dígito verificador incluido
+// al final) como NN.NNN.NNN-D.
+function formatRut(v){
+  const s = String(v==null?"":v).replace(/[^0-9kK]/g,"");
+  if(s.length<2) return "";
+  const dv = s.slice(-1).toUpperCase();
+  const body = s.slice(0,-1).replace(/\B(?=(\d{3})+(?!\d))/g,".");
+  return body + "-" + dv;
 }
 const norm = s => String(s==null?"":s).replace(/\s+/g,"").toUpperCase();
 const progTokens = v => String(v==null?"":v).split("/").map(t=>t.trim().toUpperCase()).filter(Boolean);
@@ -419,6 +438,7 @@ function filasDesdeProgramacionAcademica(aoa, found){
   const iHorario    = idxCol(hdrNorm, ["HORARIO"]);
   const iTipoAct    = idxCol(hdrNorm, ["TIPO ACTIVIDAD"]);
   const iProf       = idxCol(hdrNorm, ["NOMBRE PROFESOR"]);
+  const iRut        = idxCol(hdrNorm, ["RUT PROFESOR","RUT"]);
   const iSala       = idxCol(hdrNorm, ["SALA"]);
   const iVacantes   = idxCol(hdrNorm, ["VACANTES"]);
   const iRestric    = idxCol(hdrNorm, ["RESTRIC. COD.PROGRAMA","RESTRIC COD PROGRAMA","RESTRIC. COD. PROGRAMA","RESTRIC.COD.PROGRAMA"]);
@@ -445,6 +465,7 @@ function filasDesdeProgramacionAcademica(aoa, found){
       HORARIO: iHorario>=0 ? String(row[iHorario]??"") : "",
       ACTIVIDAD: iTipoAct>=0 ? String(row[iTipoAct]??"") : "",
       NOMBRE: iProf>=0 ? String(row[iProf]??"") : "",
+      RUT_PROF: iRut>=0 ? String(row[iRut]??"").trim() : "",
       ROOM_CODE: iSala>=0 ? String(row[iSala]??"").trim() : "",
       CUPOS: iVacantes>=0 ? row[iVacantes] : "",
       RESTRICCIONES_PROGRAMA: iRestric>=0 ? String(row[iRestric]??"") : "",
@@ -577,12 +598,13 @@ function etiquetaDeFila(row){
   const nrc  = String(row.NRC||"").trim();
   const tipo = tipoActividad(row.ACTIVIDAD);
   const prof = abreviarProf(row.NOMBRE);
+  const rut  = formatRut(row.RUT_PROF);
   const sala = String(row.ROOM_CODE||"").trim();
   const cupos= String(row.CUPOS||"").trim();
 
   let main = nrc ? `${code}, ${secc}, NRC ${nrc}, ${tipo}` : `${code}, ${secc}, ${tipo}`;
   const extras = [];
-  if(prof) extras.push(prof);
+  if(prof) extras.push(rut ? `${prof} (${rut})` : prof);
   if(sala) extras.push(sala);
   let tail = extras.length ? ", "+extras.join(", ") : "";
   if(cupos) tail += ` (Cupos: ${cupos})`;
