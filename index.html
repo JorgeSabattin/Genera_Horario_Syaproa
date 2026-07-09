@@ -392,6 +392,7 @@ let COLOR_MAP = {};       // codigoCurso -> color (consistente)
 let GLOSA = [];           // [{code, nombre, sem}] de la selección actual
 let TABS = [];            // [{name, grid}]
 let activeTab = 0;
+let RESUMEN_VAC = [];      // [{code, nombre, sem, vac}] de la última generación (para exportar)
 
 // ============================================================
 // PARSEO DE ARCHIVOS
@@ -939,8 +940,10 @@ function renderLegend(filas){
     if(!set[c]) set[c] = {nombre:String(r.NOMBRE_CURSO||"").trim(), sem: MALLA?MALLA[codigoEnMalla(c)]:null};
   }
   const vac = vacantesSinTope(filas);
+  const entries = Object.entries(set).sort((a,b)=>a[0].localeCompare(b[0]));
+  RESUMEN_VAC = entries.map(([c,info])=>({code:c, nombre:info.nombre, sem:info.sem, vac:vac[c]||0}));
   const host = document.getElementById("legend");
-  host.innerHTML = Object.entries(set).sort((a,b)=>a[0].localeCompare(b[0])).map(([c,info])=>{
+  host.innerHTML = entries.map(([c,info])=>{
     const col = colorDe(c);
     const sem = info.sem!=null ? `<span class="sem">· ${info.sem}°</span>` : "";
     const n = vac[c]||0;
@@ -1009,6 +1012,43 @@ async function exportarExcel(){
         cSem.font={name:"Calibri",size:10}; cSem.alignment={horizontal:"center",vertical:"middle"}; cSem.border=border;
       });
       ws.getColumn(1).width=12; ws.getColumn(2).width=48; ws.getColumn(3).width=12;
+      ws.views=[{state:"frozen", ySplit:1}];
+    }
+
+    // Hoja de resumen "vacantes sin tope" por asignatura (cuello de botella)
+    if(RESUMEN_VAC && RESUMEN_VAC.length){
+      const ws = wb.addWorksheet("Vacantes sin tope");
+      ["Código","Asignatura","Semestre","Vacantes sin tope"].forEach((txt,i)=>{
+        const c = ws.getRow(1).getCell(i+1);
+        c.value = txt; c.font={bold:true,name:"Calibri",size:10};
+        c.alignment={horizontal:"center",vertical:"middle"};
+        c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FFD9D9D9"}};
+        c.border=border;
+      });
+      const minVac = Math.min(...RESUMEN_VAC.map(r=>r.vac));
+      RESUMEN_VAC.forEach((r,idx)=>{
+        const row = ws.getRow(idx+2);
+        const cCod=row.getCell(1), cNom=row.getCell(2), cSem=row.getCell(3), cVac=row.getCell(4);
+        const esMin = r.vac===minVac;
+        cCod.value = r.code;
+        cCod.font = {bold:true,name:"Calibri",size:10,color:{argb:argb(colorDe(r.code))}};
+        cCod.alignment={vertical:"middle"}; cCod.border=border;
+        cNom.value = r.nombre;
+        cNom.font={name:"Calibri",size:10}; cNom.alignment={vertical:"middle",wrapText:true}; cNom.border=border;
+        cSem.value = (r.sem!=null) ? (r.sem+"°") : "";
+        cSem.font={name:"Calibri",size:10}; cSem.alignment={horizontal:"center",vertical:"middle"}; cSem.border=border;
+        cVac.value = r.vac;
+        cVac.font={name:"Calibri",size:10,bold:esMin, color: esMin?{argb:"FFC00000"}:undefined};
+        cVac.alignment={horizontal:"center",vertical:"middle"}; cVac.border=border;
+        if(esMin) [cCod,cNom,cSem,cVac].forEach(c=>c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FFFCE4E4"}});
+      });
+      const rTotal = ws.getRow(RESUMEN_VAC.length+3);
+      rTotal.getCell(1).value = "Cupo total del set (cuello de botella):";
+      rTotal.getCell(1).font = {bold:true,name:"Calibri",size:10};
+      rTotal.getCell(4).value = minVac;
+      rTotal.getCell(4).font = {bold:true,name:"Calibri",size:10,color:{argb:"FFC00000"}};
+      rTotal.getCell(4).alignment = {horizontal:"center"};
+      ws.getColumn(1).width=12; ws.getColumn(2).width=48; ws.getColumn(3).width=12; ws.getColumn(4).width=18;
       ws.views=[{state:"frozen", ySplit:1}];
     }
 
