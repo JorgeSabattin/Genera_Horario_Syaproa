@@ -441,6 +441,7 @@ function filasDesdeProgramacionAcademica(aoa, found){
   const iProf       = idxCol(hdrNorm, ["NOMBRE PROFESOR"]);
   const iRut        = idxCol(hdrNorm, ["RUT PROFESOR","RUT"]);
   const iSala       = idxCol(hdrNorm, ["SALA"]);
+  const iEdificio   = idxCol(hdrNorm, ["EDIFICIO"]);
   const iVacantes   = idxCol(hdrNorm, ["VACANTES"]);
   const iInscritos  = idxCol(hdrNorm, ["INSCRITOS"]);
   const iRestric    = idxCol(hdrNorm, ["RESTRIC. COD.PROGRAMA","RESTRIC COD PROGRAMA","RESTRIC. COD. PROGRAMA","RESTRIC.COD.PROGRAMA"]);
@@ -469,6 +470,7 @@ function filasDesdeProgramacionAcademica(aoa, found){
       NOMBRE: iProf>=0 ? String(row[iProf]??"") : "",
       RUT_PROF: iRut>=0 ? String(row[iRut]??"").trim() : "",
       ROOM_CODE: iSala>=0 ? String(row[iSala]??"").trim() : "",
+      EDIFICIO: iEdificio>=0 ? String(row[iEdificio]??"").trim() : "",
       CUPOS: iVacantes>=0 ? row[iVacantes] : "",
       INSCRITOS: iInscritos>=0 ? row[iInscritos] : "",
       RESTRICCIONES_PROGRAMA: iRestric>=0 ? String(row[iRestric]??"") : "",
@@ -595,14 +597,84 @@ function slotsDeFila(row){
   return slots;
 }
 
-function etiquetaDeFila(row){
+// Une edificio + sala en un solo texto de sala para mostrar ("A1 COM304").
+// Si falta alguno de los dos, muestra el que exista.
+function salaEdifTxt(seg){
+  const sala = String(seg && seg.sala || "").trim();
+  const edif = String(seg && seg.edif || "").trim();
+  if(sala && edif) return `${edif} ${sala}`;
+  return sala || edif || "";
+}
+
+// Divide HORARIO / SALA / EDIFICIO de una fila en "segmentos" alineados por
+// posición: en el formato Banner/syaproa, cuando una sección tiene distintos
+// horarios en distintos días (p.ej. ".Vi 0830-1010 / .Ma 0830-1010"), la sala
+// y el edificio de cada uno vienen en el mismo orden, separados por "/"
+// (p.ej. "COM304 / COM303" y "A1 / A1"). Esta función empareja cada bloque de
+// horario con su sala y edificio, en vez de repetir el texto completo de todas
+// las salas en cada día.
+function segmentosDeFila(row){
+  const salas     = String(row.ROOM_CODE||"").split("/").map(s=>s.trim());
+  const edificios = String(row.EDIFICIO||"").split("/").map(s=>s.trim());
+  function salaEdifDe(i){
+    const nSeg = Math.max(salas.length, edificios.length);
+    if(nSeg<=1) return {sala:salas[0]||"", edif:edificios[0]||""};
+    return {
+      sala: salas.length===nSeg ? (salas[i]||"") : (salas[0]||""),
+      edif: edificios.length===nSeg ? (edificios[i]||"") : (edificios[0]||"")
+    };
+  }
+
+  const out = [];
+  // 1) formato módulos directos (p.ej. ".Lu 3-5")
+  {
+    const txt = String(row.HORARIO||"").replace(/[\/;]/g," ");
+    let m, i=0; HORARIO_RE.lastIndex = 0;
+    while((m = HORARIO_RE.exec(txt))){
+      const d = dayKey(m[1]);
+      if(d){
+        let a = parseInt(m[2],10), b = parseInt(m[3],10);
+        if(a>b)[a,b]=[b,a];
+        const slots = new Set();
+        for(let k=a;k<=b;k++) if(k>=1&&k<=20) slots.add(d+"|"+k);
+        if(slots.size) out.push({slots, ...salaEdifDe(i)});
+      }
+      i++;
+    }
+  }
+  if(out.length) return out;
+  // 2) formato horas de reloj (p.ej. ".Ju 0830 - 1200")
+  {
+    const txtClock = String(row.HORARIO||"").replace(/[\/;]/g," ");
+    let mc, i=0; HORARIO_CLOCK_RE.lastIndex = 0;
+    while((mc = HORARIO_CLOCK_RE.exec(txtClock))){
+      const d = dayKey(mc[1]);
+      if(d){
+        const ini = hhmmAMinutos(mc[2]), fin = hhmmAMinutos(mc[3]);
+        if(ini!=null && fin!=null){
+          const slots = new Set();
+          for(const k of modulosEnRangoHorario(ini,fin)) slots.add(d+"|"+k);
+          if(slots.size) out.push({slots, ...salaEdifDe(i)});
+        }
+      }
+      i++;
+    }
+  }
+  if(out.length) return out;
+  // 3) fallback: columnas DESDE/HASTA (formato antiguo, sin múltiples salas)
+  const slots = slotsDeFila(row);
+  if(slots.size) out.push({slots, ...salaEdifDe(0)});
+  return out;
+}
+
+function etiquetaDeFila(row, salaOverride){
   const code = String(row.CURSO||"").trim();
   const secc = String(row.SECCION||"").trim();
   const nrc  = String(row.NRC||"").trim();
   const tipo = tipoActividad(row.ACTIVIDAD);
   const prof = abreviarProf(row.NOMBRE);
   const rut  = formatRut(row.RUT_PROF);
-  const sala = String(row.ROOM_CODE||"").trim();
+  const sala = salaOverride!=null ? salaOverride : salaEdifTxt({sala:row.ROOM_CODE, edif:row.EDIFICIO});
   const cupos= String(row.CUPOS||"").trim();
   const inscritos = String(row.INSCRITOS??"").trim();
 
@@ -676,10 +748,12 @@ function grillaVacia(){
 function construirGrillaCompleta(filas){
   const g = grillaVacia();
   for(const row of filas){
-    const label = etiquetaDeFila(row);
-    for(const s of slotsDeFila(row)){
-      const [d,k] = s.split("|");
-      g[d][+k].push(label);
+    for(const seg of segmentosDeFila(row)){
+      const label = etiquetaDeFila(row, salaEdifTxt(seg));
+      for(const s of seg.slots){
+        const [d,k] = s.split("|");
+        g[d][+k].push(label);
+      }
     }
   }
   return g;
@@ -813,8 +887,10 @@ function generarHorariosAlumno(filas){
       op.secs.forEach(s=> s.nrc && usadosNRC.add(s.nrc));
       for(const s of op.secs){
         for(const row of s.rows){
-          const label = etiquetaDeFila(row);
-          for(const sl of slotsDeFila(row)){ const [d,k]=sl.split("|"); g[d][+k].push(label); }
+          for(const seg of segmentosDeFila(row)){
+            const label = etiquetaDeFila(row, salaEdifTxt(seg));
+            for(const sl of seg.slots){ const [d,k]=sl.split("|"); g[d][+k].push(label); }
+          }
         }
       }
     }
