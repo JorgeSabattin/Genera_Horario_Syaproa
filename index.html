@@ -1022,6 +1022,7 @@ function construirResumenSecciones(filas){
     if(!nrc) continue;
     if(!byNrc[nrc]){
       byNrc[nrc] = {
+        nrc,
         codigo: String(r.CURSO||"").trim(),
         nombre: String(r.NOMBRE_CURSO||"").trim(),
         rutProf: formatRut(r.RUT_PROF),
@@ -1036,7 +1037,7 @@ function construirResumenSecciones(filas){
   return orden
     .map(nrc=>{
       const s = byNrc[nrc];
-      return {codigo:s.codigo, nombre:s.nombre, rutProf:s.rutProf, nombreProf:s.nombreProf, horario:s.horarios.join(" / ")};
+      return {nrc:s.nrc, codigo:s.codigo, nombre:s.nombre, rutProf:s.rutProf, nombreProf:s.nombreProf, horario:s.horarios.join(" / ")};
     })
     .sort((a,b)=> a.codigo.localeCompare(b.codigo) || a.nombre.localeCompare(b.nombre));
 }
@@ -1165,7 +1166,7 @@ async function exportarExcel(){
     // profesor, y horario — una fila por cada NRC.
     if(RESUMEN_SECCIONES && RESUMEN_SECCIONES.length){
       const ws = wb.addWorksheet("Resumen secciones");
-      ["Código","Asignatura","RUT Profesor","Nombre Profesor","Horario"].forEach((txt,i)=>{
+      ["NRC","Código","Asignatura","RUT Profesor","Nombre Profesor","Horario"].forEach((txt,i)=>{
         const c = ws.getRow(1).getCell(i+1);
         c.value = txt; c.font={bold:true,name:"Calibri",size:10};
         c.alignment={horizontal:"center",vertical:"middle"};
@@ -1174,9 +1175,11 @@ async function exportarExcel(){
       });
       RESUMEN_SECCIONES.forEach((r,idx)=>{
         const row = ws.getRow(idx+2);
-        const cCod = row.getCell(1), cNom = row.getCell(2), cRut = row.getCell(3), cProf = row.getCell(4), cHor = row.getCell(5);
+        const cNrc = row.getCell(1), cCod = row.getCell(2), cNom = row.getCell(3), cRut = row.getCell(4), cProf = row.getCell(5), cHor = row.getCell(6);
+        cNrc.value = r.nrc;
+        cNrc.font={bold:true,name:"Calibri",size:10}; cNrc.alignment={horizontal:"center",vertical:"middle"}; cNrc.border=border;
         cCod.value = r.codigo;
-        cCod.font = {bold:true,name:"Calibri",size:10,color:{argb:argb(colorDe(r.codigo))}};
+        cCod.font = {name:"Calibri",size:10,color:{argb:argb(colorDe(r.codigo))}};
         cCod.alignment={vertical:"middle"}; cCod.border=border;
         cNom.value = r.nombre;
         cNom.font={name:"Calibri",size:10}; cNom.alignment={vertical:"middle",wrapText:true}; cNom.border=border;
@@ -1187,7 +1190,7 @@ async function exportarExcel(){
         cHor.value = r.horario;
         cHor.font={name:"Calibri",size:10}; cHor.alignment={vertical:"middle",wrapText:true}; cHor.border=border;
       });
-      ws.getColumn(1).width=12; ws.getColumn(2).width=42; ws.getColumn(3).width=14; ws.getColumn(4).width=26; ws.getColumn(5).width=40;
+      ws.getColumn(1).width=10; ws.getColumn(2).width=12; ws.getColumn(3).width=42; ws.getColumn(4).width=14; ws.getColumn(5).width=26; ws.getColumn(6).width=40;
       ws.views=[{state:"frozen", ySplit:1}];
     }
 
