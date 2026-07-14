@@ -393,6 +393,7 @@ let GLOSA = [];           // [{code, nombre, sem}] de la selección actual
 let TABS = [];            // [{name, grid}]
 let activeTab = 0;
 let RESUMEN_VAC = [];      // [{code, nombre, sem, vac}] de la última generación (para exportar)
+let RESUMEN_SECCIONES = []; // [{codigo, nombre, rutProf, nombreProf, horario}] por NRC, de la última generación (para exportar)
 
 // ============================================================
 // PARSEO DE ARCHIVOS
@@ -1008,6 +1009,38 @@ function construirGlosa(filas){
   return Object.values(set).sort((a,b)=>a.code.localeCompare(b.code));
 }
 
+// Resumen por sección/NRC: código de la asignatura, nombre de la asignatura,
+// RUT del profesor, nombre del profesor y horario — una fila por cada NRC.
+// Si un mismo NRC aparece en varias filas del archivo de datos (p.ej. horario
+// partido en bloques por día en filas separadas), sus textos de HORARIO se
+// combinan en una sola celda separados por " / ".
+function construirResumenSecciones(filas){
+  const byNrc = {};
+  const orden = [];
+  for(const r of filas){
+    const nrc = String(r.NRC||"").trim();
+    if(!nrc) continue;
+    if(!byNrc[nrc]){
+      byNrc[nrc] = {
+        codigo: String(r.CURSO||"").trim(),
+        nombre: String(r.NOMBRE_CURSO||"").trim(),
+        rutProf: formatRut(r.RUT_PROF),
+        nombreProf: String(r.NOMBRE||"").trim(),
+        horarios: []
+      };
+      orden.push(nrc);
+    }
+    const h = String(r.HORARIO||"").trim();
+    if(h && !byNrc[nrc].horarios.includes(h)) byNrc[nrc].horarios.push(h);
+  }
+  return orden
+    .map(nrc=>{
+      const s = byNrc[nrc];
+      return {codigo:s.codigo, nombre:s.nombre, rutProf:s.rutProf, nombreProf:s.nombreProf, horario:s.horarios.join(" / ")};
+    })
+    .sort((a,b)=> a.codigo.localeCompare(b.codigo) || a.nombre.localeCompare(b.nombre));
+}
+
 function renderLegend(filas){
   const set = {};
   for(const r of filas){
@@ -1125,6 +1158,36 @@ async function exportarExcel(){
       rTotal.getCell(4).font = {bold:true,name:"Calibri",size:10,color:{argb:"FFC00000"}};
       rTotal.getCell(4).alignment = {horizontal:"center"};
       ws.getColumn(1).width=12; ws.getColumn(2).width=48; ws.getColumn(3).width=12; ws.getColumn(4).width=18;
+      ws.views=[{state:"frozen", ySplit:1}];
+    }
+
+    // Hoja de resumen de secciones: código, asignatura, RUT y nombre del
+    // profesor, y horario — una fila por cada NRC.
+    if(RESUMEN_SECCIONES && RESUMEN_SECCIONES.length){
+      const ws = wb.addWorksheet("Resumen secciones");
+      ["Código","Asignatura","RUT Profesor","Nombre Profesor","Horario"].forEach((txt,i)=>{
+        const c = ws.getRow(1).getCell(i+1);
+        c.value = txt; c.font={bold:true,name:"Calibri",size:10};
+        c.alignment={horizontal:"center",vertical:"middle"};
+        c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FFD9D9D9"}};
+        c.border=border;
+      });
+      RESUMEN_SECCIONES.forEach((r,idx)=>{
+        const row = ws.getRow(idx+2);
+        const cCod = row.getCell(1), cNom = row.getCell(2), cRut = row.getCell(3), cProf = row.getCell(4), cHor = row.getCell(5);
+        cCod.value = r.codigo;
+        cCod.font = {bold:true,name:"Calibri",size:10,color:{argb:argb(colorDe(r.codigo))}};
+        cCod.alignment={vertical:"middle"}; cCod.border=border;
+        cNom.value = r.nombre;
+        cNom.font={name:"Calibri",size:10}; cNom.alignment={vertical:"middle",wrapText:true}; cNom.border=border;
+        cRut.value = r.rutProf;
+        cRut.font={name:"Calibri",size:10}; cRut.alignment={horizontal:"center",vertical:"middle"}; cRut.border=border;
+        cProf.value = r.nombreProf;
+        cProf.font={name:"Calibri",size:10}; cProf.alignment={vertical:"middle",wrapText:true}; cProf.border=border;
+        cHor.value = r.horario;
+        cHor.font={name:"Calibri",size:10}; cHor.alignment={vertical:"middle",wrapText:true}; cHor.border=border;
+      });
+      ws.getColumn(1).width=12; ws.getColumn(2).width=42; ws.getColumn(3).width=14; ws.getColumn(4).width=26; ws.getColumn(5).width=40;
       ws.views=[{state:"frozen", ySplit:1}];
     }
 
@@ -1254,6 +1317,7 @@ function generar(){
       // asignar colores en orden de aparición (igual que el Python)
       for(const r of filas) colorDe(String(r.CURSO||"").trim());
       GLOSA = construirGlosa(filas);
+      RESUMEN_SECCIONES = construirResumenSecciones(filas);
 
       const especifico = MALLA && /^\d+$/.test(String(sem));
       const gCompleta = construirGrillaCompleta(filas);
