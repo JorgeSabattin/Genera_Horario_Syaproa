@@ -263,9 +263,17 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         <label for="selProg">Programa</label>
         <select id="selProg" disabled><option>—</option></select>
       </div>
+      <div class="field" id="fieldMencion" style="display:none">
+        <label for="selMencion">Mención</label>
+        <select id="selMencion" disabled><option value="">—</option></select>
+      </div>
       <div class="field">
         <label for="selSem">Semestre</label>
         <select id="selSem" disabled><option>Carga la malla</option></select>
+      </div>
+      <div class="field" id="fieldRango" style="display:none">
+        <label for="selRango">Rango de fechas</label>
+        <select id="selRango" disabled><option value="TODOS">Todos</option></select>
       </div>
       <button class="btn btn-primary" id="btnGen" disabled>Generar horarios</button>
     </div>
@@ -405,6 +413,31 @@ function sheetToObjects(ws){
   return XLSX.utils.sheet_to_json(ws, {defval:"", raw:true});
 }
 
+// Convierte una celda de fecha (serial de Excel, texto o Date) a ISO "YYYY-MM-DD".
+function serialToISO(v){
+  if(v==null || v==="") return "";
+  if(v instanceof Date){
+    const y=v.getFullYear(), m=String(v.getMonth()+1).padStart(2,"0"), d=String(v.getDate()).padStart(2,"0");
+    return `${y}-${m}-${d}`;
+  }
+  const n = Number(v);
+  if(!isNaN(n) && n>0){
+    try{
+      const d = XLSX.SSF.parse_date_code(n);
+      if(d) return `${d.y}-${String(d.m).padStart(2,"0")}-${String(d.d).padStart(2,"0")}`;
+    }catch(e){ /* sigue abajo */ }
+  }
+  return String(v).trim();
+}
+// Formatea "YYYY-MM-DD" -> "DD-MM" para mostrar en el selector.
+function fmtDDMM(iso){
+  if(!iso) return "?";
+  const p = iso.split("-");
+  return p.length===3 ? `${p[2]}-${p[1]}` : iso;
+}
+// Clave única de rango de fechas de una fila (combinación Fecha Inicio/Fecha Fin).
+function rangoKeyDe(r){ return (r.FECHA_INICIO||"") + "|" + (r.FECHA_FIN||""); }
+
 function idxCol(hdrNorm, names){
   for(const n of names){ const i = hdrNorm.indexOf(n); if(i>=0) return i; }
   return -1;
@@ -447,6 +480,8 @@ function filasDesdeProgramacionAcademica(aoa, found){
   const iInscritos  = idxCol(hdrNorm, ["INSCRITOS"]);
   const iRestric    = idxCol(hdrNorm, ["RESTRIC. COD.PROGRAMA","RESTRIC COD PROGRAMA","RESTRIC. COD. PROGRAMA","RESTRIC.COD.PROGRAMA"]);
   const iNombreAsig = idxCol(hdrNorm, ["NOMBRE ASIGNATURA"]);
+  const iFechaIni   = idxCol(hdrNorm, ["FECHA INICIO"]);
+  const iFechaFin   = idxCol(hdrNorm, ["FECHA FIN"]);
   if(iNRC<0 || iHorario<0 || (iCodigo<0 && (iMateria<0 || iCurso<0))){
     throw new Error("Formato Programación Académica: faltan columnas clave (Código, o Materia+Curso / NRC / Horario).");
   }
@@ -475,7 +510,9 @@ function filasDesdeProgramacionAcademica(aoa, found){
       CUPOS: iVacantes>=0 ? row[iVacantes] : "",
       INSCRITOS: iInscritos>=0 ? row[iInscritos] : "",
       RESTRICCIONES_PROGRAMA: iRestric>=0 ? String(row[iRestric]??"") : "",
-      NOMBRE_CURSO: iNombreAsig>=0 ? String(row[iNombreAsig]??"") : ""
+      NOMBRE_CURSO: iNombreAsig>=0 ? String(row[iNombreAsig]??"") : "",
+      FECHA_INICIO: iFechaIni>=0 ? serialToISO(row[iFechaIni]) : "",
+      FECHA_FIN: iFechaFin>=0 ? serialToISO(row[iFechaFin]) : ""
     });
   }
   return out;
@@ -507,13 +544,34 @@ function parseDataFile(wb){
   throw new Error("No encontré la hoja de datos (faltan columnas CURSO/NRC/HORARIO, o Código/NRC/Horario/Tipo Actividad).");
 }
 
+// Analiza el texto de una celda que podría ser encabezado de bloque de semestre,
+// p.ej. "9600-1SEM - 1 SEM TECNOLOGIA MEDICA" o "9600-4SA - 4 SEM TEC. MED. BACIMET".
+// Usa el ÚLTIMO segmento tras " - " (más confiable que buscar el primer número
+// en todo el string, que puede chocar con el código del bloque, p.ej. "4SA").
+const RE_SEM_BLOQUE = /(\d+)\s*SEM\b/i;                                   // detección rápida "1SEM","10SEM","1 SEM"
+function parseBloqueHeader(a){
+  const partes = String(a).split(/\s+-\s+/);
+  const ultima = partes[partes.length-1].trim();
+  let m = ultima.match(/^(\d+)\s*SEM\.?\s*(.*)$/i);
+  if(m) return {sem: parseInt(m[1],10), resto: m[2].trim()};
+  m = String(a).match(RE_SEM_BLOQUE);                                    // fallback: sin " - "
+  return m ? {sem: parseInt(m[1],10), resto: ""} : null;
+}
+// Limpia el nombre de mención/especialidad quitando el prefijo genérico "TEC. MED."
+// y puntos/espacios sobrantes, p.ej. "TEC. MED. BACIMET" -> "BACIMET".
+function limpiarMencion(resto){
+  const r = String(resto||"").replace(/^TEC\.?\s*MED\.?\s*/i,"").replace(/\.+\s*$/,"").replace(/\s+/g," ").trim();
+  return r || String(resto||"").trim();
+}
+
 function parseMallaFile(wb){
-  // Devuelve siempre { CODIGO_CURSO -> semestreInt }.
+  // Devuelve siempre { base:{CODIGO->semestreInt}, menciones:{NOMBRE_MENCION:{CODIGO->semestreInt}}, mencionesList:[...] }.
   // Soporta el formato estándar nuevo (agrupado por bloques de semestre, p.ej.
-  // "2210-1SEM - 1SEM-ING CIVIL INFORMÁTICA" + encabezado "Asignatura" + filas de curso)
-  // y, por compatibilidad, el formato antiguo (col A = semestre, col B = código).
+  // "2210-1SEM - 1SEM-ING CIVIL INFORMÁTICA" + encabezado "Asignatura" + filas de curso),
+  // el formato antiguo (col A = semestre, col B = código), y mallas que se bifurcan en
+  // menciones/especialidades desde cierto semestre (varios bloques con el mismo N° de
+  // semestre pero nombres distintos, p.ej. Tecnología Médica: BACIMET/IFIME/MORFOFISIO/...).
   const aoaDe = sn => XLSX.utils.sheet_to_json(wb.Sheets[sn], {header:1, defval:"", raw:true});
-  const reSemBloque = /(\d+)\s*SEM\b/i;                                   // "1SEM", "10SEM"
   const esCodigo = v => /^[A-Za-zÁÉÍÓÚÑ]{2,6}\d{2,5}[A-Za-z]?$/.test(String(v||"").trim());
 
   let ws=null, aoa=null;
@@ -521,7 +579,7 @@ function parseMallaFile(wb){
   // 1) Formato nuevo: alguna hoja con bloques de semestre en la primera columna
   for(const sn of wb.SheetNames){
     const a = aoaDe(sn);
-    if(a.some(r => reSemBloque.test(String(r[0]||"")))){ ws=sn; aoa=a; break; }
+    if(a.some(r => RE_SEM_BLOQUE.test(String(r[0]||"")))){ ws=sn; aoa=a; break; }
   }
   // 2) Formato antiguo: encabezados Semestre / Código
   if(!ws){
@@ -537,29 +595,61 @@ function parseMallaFile(wb){
   if(!aoa) aoa = aoaDe(ws);
   if(!aoa || !aoa.length) throw new Error("La malla está vacía o no es legible.");
 
-  const map = {};
-
-  // Formato nuevo (agrupado por bloques de semestre)
-  if(aoa.some(r => reSemBloque.test(String(r[0]||"")))){
-    let curSem = null;
+  // Formato nuevo (agrupado por bloques de semestre, con posibles menciones)
+  if(aoa.some(r => RE_SEM_BLOQUE.test(String(r[0]||"")))){
+    const blocks = [];
+    let cur = null;
     for(const r of aoa){
       const a = String(r[0]||"").trim();
       const b = String(r[1]||"").trim();              // nombre de la asignatura
-      const m = a.match(reSemBloque);
-      if(m){ curSem = parseInt(m[1],10); continue; }   // encabezado de bloque
-      if(curSem!=null && b && esCodigo(a)) map[a.toUpperCase()] = curSem;  // fila de curso
+      const hdr = a ? parseBloqueHeader(a) : null;
+      if(hdr){ cur = {sem: hdr.sem, label: limpiarMencion(hdr.resto), codes:{}}; blocks.push(cur); continue; }
+      if(cur && b && esCodigo(a)) cur.codes[a.toUpperCase()] = true;   // fila de curso
     }
-    return map;
+    // agrupa bloques por semestre: si en un mismo semestre hay más de un nombre
+    // de bloque distinto, es que la malla se bifurca en menciones ahí
+    const porSem = {};
+    for(const bl of blocks) (porSem[bl.sem] = porSem[bl.sem]||[]).push(bl);
+
+    // la misma mención puede venir abreviada distinto según el semestre (p.ej.
+    // "MORFO" en 4° vs "MORFOFISIO" en 5°-10°): se fusionan por coincidencia de
+    // prefijo, priorizando como nombre canónico el más largo/descriptivo.
+    const labelsRamificados = new Set();
+    for(const bls of Object.values(porSem)){
+      if(new Set(bls.map(b=>b.label||"")).size>1) bls.forEach(b=>labelsRamificados.add(b.label||"(sin nombre)"));
+    }
+    const canon = {};
+    for(const lbl of [...labelsRamificados].sort((a,b)=>b.length-a.length)){
+      const cl = Object.keys(canon).find(c=>canon[c]===c && c.length>=3 && lbl.length>=3 && (c.startsWith(lbl)||lbl.startsWith(c)));
+      canon[lbl] = cl ? canon[cl] : lbl;
+    }
+
+    const base = {}, menciones = {};
+    for(const bls of Object.values(porSem)){
+      const sem = bls[0].sem;
+      const labelsDistintos = new Set(bls.map(b=>b.label||""));
+      if(labelsDistintos.size<=1){
+        for(const bl of bls) for(const cod in bl.codes) base[cod] = sem;
+      }else{
+        for(const bl of bls){
+          const key = canon[bl.label||"(sin nombre)"] || bl.label || "(sin nombre)";
+          if(!menciones[key]) menciones[key] = {};
+          for(const cod in bl.codes) menciones[key][cod] = sem;
+        }
+      }
+    }
+    return {base, menciones, mencionesList: Object.keys(menciones).sort()};
   }
 
-  // Formato antiguo: col A = semestre, col B = código
+  // Formato antiguo: col A = semestre, col B = código (sin menciones)
+  const base = {};
   let curSem = null;
   for(let i=1;i<aoa.length;i++){
     const semRaw = aoa[i][0], cod = aoa[i][1];
     if(semRaw){ const m = String(semRaw).match(/(\d+)/); if(m) curSem = parseInt(m[1],10); }
-    if(cod && String(cod).trim()) map[String(cod).trim().toUpperCase()] = curSem;
+    if(cod && String(cod).trim()) base[String(cod).trim().toUpperCase()] = curSem;
   }
-  return map;
+  return {base, menciones:{}, mencionesList:[]};
 }
 
 // ============================================================
@@ -699,12 +789,18 @@ function etiquetaDeFila(row, salaOverride){
 // ceros a la izquierda (Banner guarda el número como entero: FMMP012 -> 12
 // -> "FMMP12"). Esta función busca la clave de MALLA equivalente probando
 // distintos anchos de relleno antes de rendirse.
+function codigoExisteEnMalla(c){
+  if(!MALLA) return false;
+  if(c in MALLA.base) return true;
+  for(const k in MALLA.menciones) if(c in MALLA.menciones[k]) return true;
+  return false;
+}
 const _mallaKeyCache = {};
 function codigoEnMalla(curso){
   const c = String(curso||"").trim().toUpperCase();
   if(!MALLA) return c;
   if(c in _mallaKeyCache) return _mallaKeyCache[c];
-  if(c in MALLA){ _mallaKeyCache[c]=c; return c; }
+  if(codigoExisteEnMalla(c)){ _mallaKeyCache[c]=c; return c; }
   const m = c.match(/^([A-ZÁÉÍÓÚÑ]+)(\d+)$/);
   let resuelto = c;
   if(m){
@@ -712,19 +808,29 @@ function codigoEnMalla(curso){
     const candidatos = [digs.padStart(3,"0"), digs.padStart(4,"0"), digs.padStart(2,"0"), String(parseInt(digs,10))];
     for(const d of candidatos){
       const cand = pref+d;
-      if(cand in MALLA){ resuelto = cand; break; }
+      if(codigoExisteEnMalla(cand)){ resuelto = cand; break; }
     }
   }
   _mallaKeyCache[c] = resuelto;
   return resuelto;
 }
+// Semestre de un código, para una mención dada (""/null = sin mención elegida).
+// Prioriza el tronco común (base); si no está ahí, busca en la mención indicada.
+function semestreDe(curso, mencion){
+  if(!MALLA) return null;
+  const c = codigoEnMalla(curso);
+  if(c in MALLA.base) return MALLA.base[c];
+  if(mencion && MALLA.menciones[mencion] && (c in MALLA.menciones[mencion])) return MALLA.menciones[mencion][c];
+  return null;
+}
 
-function filtrarFilas(prog, sem){
+function filtrarFilas(prog, sem, mencion, rango){
   prog = norm(prog);
   const filas = DATA_ROWS.filter(r=>{
     if(!progTokens(r.RESTRICCIONES_PROGRAMA).includes(prog)) return false;
+    if(rango && rango!=="TODOS" && rangoKeyDe(r)!==rango) return false;
     if(MALLA && /^\d+$/.test(String(sem))){
-      const s = MALLA[codigoEnMalla(r.CURSO)];
+      const s = semestreDe(r.CURSO, mencion);
       if(String(s)!==String(sem)) return false;
     }
     return true;
@@ -915,8 +1021,17 @@ function cuposDeNrc(filas){
   }
   return m;
 }
+function inscritosDeNrc(filas){
+  const m = {};
+  for(const r of filas){
+    const n = String(r.NRC||"").trim();
+    if(n && !(n in m)){ const c = parseInt(String(r.INSCRITOS||"").trim(),10); m[n] = isNaN(c)?0:c; }
+  }
+  return m;
+}
 function vacantesSinTope(filas){
   const cupos      = cuposDeNrc(filas);
+  const inscritos  = inscritosDeNrc(filas);
   const secciones  = construirSecciones(filas);          // solo secciones con horario
   const opciones   = opcionesPorCurso(secciones);
   const cursosSlot = Object.keys(opciones).filter(c=>opciones[c].length>0);
@@ -947,20 +1062,20 @@ function vacantesSinTope(filas){
   }
   for(const s of secciones) slotsNrc[s.nrc] = s.slots.size;
 
-  const out = {};
+  const vac = {}, insc = {};
   for(const [curso, nrcSet] of Object.entries(nrcsPorCurso)){
-    let total = 0;
+    let totalVac = 0, totalInsc = 0;
     const slotted = cursosSlot.includes(curso);
     for(const nrc of nrcSet){
       let cabe;
       if(!slotted)              cabe = true;   // asignatura sin horario: nunca choca
       else if(!slotsNrc[nrc])   cabe = true;   // sección sin horario: no puede chocar
       else                      cabe = existe(curso, op=>op.secs.some(s=>s.nrc===nrc));
-      if(cabe) total += (cupos[nrc]||0);
+      if(cabe){ totalVac += (cupos[nrc]||0); totalInsc += (inscritos[nrc]||0); }
     }
-    out[curso] = total;
+    vac[curso] = totalVac; insc[curso] = totalInsc;
   }
-  return out;
+  return {vac, insc};
 }
 
 // ============================================================
@@ -999,12 +1114,12 @@ function gridToHTML(g){
 }
 function escapeHtml(s){return String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
 
-function construirGlosa(filas){
+function construirGlosa(filas, mencion){
   const set = {};
   for(const r of filas){
     const c = String(r.CURSO||"").trim();
     if(!c) continue;
-    if(!set[c]) set[c] = {code:c, nombre:String(r.NOMBRE_CURSO||"").trim(), sem: MALLA?MALLA[codigoEnMalla(c)]:null};
+    if(!set[c]) set[c] = {code:c, nombre:String(r.NOMBRE_CURSO||"").trim(), sem: MALLA?semestreDe(c,mencion):null};
   }
   return Object.values(set).sort((a,b)=>a.code.localeCompare(b.code));
 }
@@ -1021,12 +1136,16 @@ function construirResumenSecciones(filas){
     const nrc = String(r.NRC||"").trim();
     if(!nrc) continue;
     if(!byNrc[nrc]){
+      const cupos = parseInt(String(r.CUPOS||"").trim(),10);
+      const inscritos = parseInt(String(r.INSCRITOS||"").trim(),10);
       byNrc[nrc] = {
         nrc,
         codigo: String(r.CURSO||"").trim(),
         nombre: String(r.NOMBRE_CURSO||"").trim(),
         rutProf: formatRut(r.RUT_PROF),
         nombreProf: String(r.NOMBRE||"").trim(),
+        vacantes: isNaN(cupos)?0:cupos,
+        inscritos: isNaN(inscritos)?0:inscritos,
         horarios: []
       };
       orden.push(nrc);
@@ -1037,21 +1156,21 @@ function construirResumenSecciones(filas){
   return orden
     .map(nrc=>{
       const s = byNrc[nrc];
-      return {nrc:s.nrc, codigo:s.codigo, nombre:s.nombre, rutProf:s.rutProf, nombreProf:s.nombreProf, horario:s.horarios.join(" / ")};
+      return {nrc:s.nrc, codigo:s.codigo, nombre:s.nombre, rutProf:s.rutProf, nombreProf:s.nombreProf, vacantes:s.vacantes, inscritos:s.inscritos, horario:s.horarios.join(" / ")};
     })
     .sort((a,b)=> a.codigo.localeCompare(b.codigo) || a.nombre.localeCompare(b.nombre));
 }
 
-function renderLegend(filas){
+function renderLegend(filas, mencion){
   const set = {};
   for(const r of filas){
     const c = String(r.CURSO||"").trim();
     if(!c) continue;
-    if(!set[c]) set[c] = {nombre:String(r.NOMBRE_CURSO||"").trim(), sem: MALLA?MALLA[codigoEnMalla(c)]:null};
+    if(!set[c]) set[c] = {nombre:String(r.NOMBRE_CURSO||"").trim(), sem: MALLA?semestreDe(c,mencion):null};
   }
-  const vac = vacantesSinTope(filas);
+  const {vac, insc} = vacantesSinTope(filas);
   const entries = Object.entries(set).sort((a,b)=>a[0].localeCompare(b[0]));
-  RESUMEN_VAC = entries.map(([c,info])=>({code:c, nombre:info.nombre, sem:info.sem, vac:vac[c]||0}));
+  RESUMEN_VAC = entries.map(([c,info])=>({code:c, nombre:info.nombre, sem:info.sem, vac:vac[c]||0, insc:insc[c]||0}));
   const host = document.getElementById("legend");
   host.innerHTML = entries.map(([c,info])=>{
     const col = colorDe(c);
@@ -1128,7 +1247,7 @@ async function exportarExcel(){
     // Hoja de resumen "vacantes sin tope" por asignatura (cuello de botella)
     if(RESUMEN_VAC && RESUMEN_VAC.length){
       const ws = wb.addWorksheet("Vacantes sin tope");
-      ["Código","Asignatura","Semestre","Vacantes sin tope"].forEach((txt,i)=>{
+      ["Código","Asignatura","Semestre","Vacantes sin tope","Inscritos"].forEach((txt,i)=>{
         const c = ws.getRow(1).getCell(i+1);
         c.value = txt; c.font={bold:true,name:"Calibri",size:10};
         c.alignment={horizontal:"center",vertical:"middle"};
@@ -1138,7 +1257,7 @@ async function exportarExcel(){
       const minVac = Math.min(...RESUMEN_VAC.map(r=>r.vac));
       RESUMEN_VAC.forEach((r,idx)=>{
         const row = ws.getRow(idx+2);
-        const cCod=row.getCell(1), cNom=row.getCell(2), cSem=row.getCell(3), cVac=row.getCell(4);
+        const cCod=row.getCell(1), cNom=row.getCell(2), cSem=row.getCell(3), cVac=row.getCell(4), cInsc=row.getCell(5);
         const esMin = r.vac===minVac;
         cCod.value = r.code;
         cCod.font = {bold:true,name:"Calibri",size:10,color:{argb:argb(colorDe(r.code))}};
@@ -1150,7 +1269,9 @@ async function exportarExcel(){
         cVac.value = r.vac;
         cVac.font={name:"Calibri",size:10,bold:esMin, color: esMin?{argb:"FFC00000"}:undefined};
         cVac.alignment={horizontal:"center",vertical:"middle"}; cVac.border=border;
-        if(esMin) [cCod,cNom,cSem,cVac].forEach(c=>c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FFFCE4E4"}});
+        cInsc.value = r.insc;
+        cInsc.font={name:"Calibri",size:10}; cInsc.alignment={horizontal:"center",vertical:"middle"}; cInsc.border=border;
+        if(esMin) [cCod,cNom,cSem,cVac,cInsc].forEach(c=>c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FFFCE4E4"}});
       });
       const rTotal = ws.getRow(RESUMEN_VAC.length+3);
       rTotal.getCell(1).value = "Cupo total del set (cuello de botella):";
@@ -1158,7 +1279,7 @@ async function exportarExcel(){
       rTotal.getCell(4).value = minVac;
       rTotal.getCell(4).font = {bold:true,name:"Calibri",size:10,color:{argb:"FFC00000"}};
       rTotal.getCell(4).alignment = {horizontal:"center"};
-      ws.getColumn(1).width=12; ws.getColumn(2).width=48; ws.getColumn(3).width=12; ws.getColumn(4).width=18;
+      ws.getColumn(1).width=12; ws.getColumn(2).width=48; ws.getColumn(3).width=12; ws.getColumn(4).width=18; ws.getColumn(5).width=12;
       ws.views=[{state:"frozen", ySplit:1}];
     }
 
@@ -1166,7 +1287,7 @@ async function exportarExcel(){
     // profesor, y horario — una fila por cada NRC.
     if(RESUMEN_SECCIONES && RESUMEN_SECCIONES.length){
       const ws = wb.addWorksheet("Resumen secciones");
-      ["NRC","Código","Asignatura","RUT Profesor","Nombre Profesor","Horario"].forEach((txt,i)=>{
+      ["NRC","Código","Asignatura","RUT Profesor","Nombre Profesor","Vacantes","Inscritos","Horario"].forEach((txt,i)=>{
         const c = ws.getRow(1).getCell(i+1);
         c.value = txt; c.font={bold:true,name:"Calibri",size:10};
         c.alignment={horizontal:"center",vertical:"middle"};
@@ -1175,7 +1296,7 @@ async function exportarExcel(){
       });
       RESUMEN_SECCIONES.forEach((r,idx)=>{
         const row = ws.getRow(idx+2);
-        const cNrc = row.getCell(1), cCod = row.getCell(2), cNom = row.getCell(3), cRut = row.getCell(4), cProf = row.getCell(5), cHor = row.getCell(6);
+        const cNrc = row.getCell(1), cCod = row.getCell(2), cNom = row.getCell(3), cRut = row.getCell(4), cProf = row.getCell(5), cVac = row.getCell(6), cInsc = row.getCell(7), cHor = row.getCell(8);
         cNrc.value = r.nrc;
         cNrc.font={bold:true,name:"Calibri",size:10}; cNrc.alignment={horizontal:"center",vertical:"middle"}; cNrc.border=border;
         cCod.value = r.codigo;
@@ -1187,10 +1308,14 @@ async function exportarExcel(){
         cRut.font={name:"Calibri",size:10}; cRut.alignment={horizontal:"center",vertical:"middle"}; cRut.border=border;
         cProf.value = r.nombreProf;
         cProf.font={name:"Calibri",size:10}; cProf.alignment={vertical:"middle",wrapText:true}; cProf.border=border;
+        cVac.value = r.vacantes;
+        cVac.font={name:"Calibri",size:10}; cVac.alignment={horizontal:"center",vertical:"middle"}; cVac.border=border;
+        cInsc.value = r.inscritos;
+        cInsc.font={name:"Calibri",size:10}; cInsc.alignment={horizontal:"center",vertical:"middle"}; cInsc.border=border;
         cHor.value = r.horario;
         cHor.font={name:"Calibri",size:10}; cHor.alignment={vertical:"middle",wrapText:true}; cHor.border=border;
       });
-      ws.getColumn(1).width=10; ws.getColumn(2).width=12; ws.getColumn(3).width=42; ws.getColumn(4).width=14; ws.getColumn(5).width=26; ws.getColumn(6).width=40;
+      ws.getColumn(1).width=10; ws.getColumn(2).width=12; ws.getColumn(3).width=42; ws.getColumn(4).width=14; ws.getColumn(5).width=26; ws.getColumn(6).width=12; ws.getColumn(7).width=12; ws.getColumn(8).width=40;
       ws.views=[{state:"frozen", ySplit:1}];
     }
 
@@ -1245,7 +1370,11 @@ async function exportarExcel(){
 
     const prog = document.getElementById("selProg").value;
     const sem  = document.getElementById("selSem").value;
-    const semTxt = (MALLA && /^\d+$/.test(String(sem))) ? `_${sem}SEM` : "";
+    const selMencion = document.getElementById("selMencion");
+    const mencion = selMencion ? selMencion.value : "";
+    const semTxt = (MALLA && /^\d+$/.test(String(sem)))
+      ? `_${sem}SEM${mencion ? "_"+mencion.replace(/\s+/g,"") : ""}`
+      : "";
     const buf = await wb.xlsx.writeBuffer();
     const blob = new Blob([buf], {type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
     const url = URL.createObjectURL(blob);
@@ -1298,6 +1427,10 @@ async function sumarContador(){            // +1 al generar horarios
 function generar(){
   const prog = document.getElementById("selProg").value;
   const sem  = document.getElementById("selSem").value;
+  const selMencion = document.getElementById("selMencion");
+  const mencion = selMencion ? selMencion.value : "";
+  const selRango = document.getElementById("selRango");
+  const rango = selRango ? selRango.value : "TODOS";
   if(!prog || prog==="—"){ toast("Elige un programa.", true); return; }
 
   const hint = document.getElementById("hint");
@@ -1306,7 +1439,7 @@ function generar(){
 
   setTimeout(()=>{
     try{
-      const filas = filtrarFilas(prog, sem);
+      const filas = filtrarFilas(prog, sem, mencion, rango);
       const note = document.getElementById("note");
       if(!filas.length){
         document.getElementById("results").style.display="none";
@@ -1319,7 +1452,7 @@ function generar(){
       COLOR_MAP = {};
       // asignar colores en orden de aparición (igual que el Python)
       for(const r of filas) colorDe(String(r.CURSO||"").trim());
-      GLOSA = construirGlosa(filas);
+      GLOSA = construirGlosa(filas, mencion);
       RESUMEN_SECCIONES = construirResumenSecciones(filas);
 
       const especifico = MALLA && /^\d+$/.test(String(sem));
@@ -1331,7 +1464,7 @@ function generar(){
       horarios.forEach((g,i)=> TABS.push({name:`Horario alumno ${i+1}`, grid:g}));
       activeTab = 0;
 
-      renderLegend(filas);
+      renderLegend(filas, mencion);
       renderTabs();
       paintActive();
 
@@ -1397,19 +1530,66 @@ function poblarProgramas(){
   if(PROG_AUTO && cont[PROG_AUTO]) sel.value = PROG_AUTO;
   poblarSemestres();
 }
+function poblarRangos(){
+  const wrap = document.getElementById("fieldRango");
+  const sel = document.getElementById("selRango");
+  const cont = {};
+  for(const r of DATA_ROWS){
+    if(!r.FECHA_INICIO && !r.FECHA_FIN) continue;
+    const k = rangoKeyDe(r);
+    cont[k] = (cont[k]||0)+1;
+  }
+  const keys = Object.keys(cont);
+  if(keys.length<=1){
+    wrap.style.display = "none";
+    sel.innerHTML = '<option value="TODOS">Todos</option>';
+    sel.disabled = true;
+    return;
+  }
+  const entries = keys.map(k=>{
+    const [ini,fin] = k.split("|");
+    let dias = null;
+    if(ini && fin){ dias = Math.round((new Date(fin) - new Date(ini)) / 86400000); }
+    return {k, ini, fin, n:cont[k], dias};
+  }).sort((a,b)=> (a.ini||"").localeCompare(b.ini||""));
+  wrap.style.display = "";
+  sel.innerHTML = '<option value="TODOS">Todos los rangos</option>' + entries.map(e=>{
+    const corto = (e.dias!=null && e.dias<=10) ? " ⚠ corto" : "";
+    return `<option value="${e.k}">${fmtDDMM(e.ini)} → ${fmtDDMM(e.fin)} (${e.n})${corto}</option>`;
+  }).join("");
+  sel.disabled = false;
+  sel.value = "TODOS";
+}
 function poblarSemestres(){
   const sel = document.getElementById("selSem");
   if(!MALLA){ sel.innerHTML='<option>Carga la malla</option>'; sel.disabled=true; return; }
   const prog = document.getElementById("selProg").value;
-  // semestres con al menos un curso presente para este programa
+  const selMencion = document.getElementById("selMencion");
+  const mencion = selMencion ? selMencion.value : "";
+  // semestres con al menos un curso presente para este programa (y mención, si aplica)
   const present = new Set();
   for(const r of DATA_ROWS){
     if(!progTokens(r.RESTRICCIONES_PROGRAMA).includes(norm(prog))) continue;
-    const s = MALLA[codigoEnMalla(r.CURSO)];
+    const s = semestreDe(r.CURSO, mencion);
     if(s!=null) present.add(s);
   }
   const sems = [...present].sort((a,b)=>a-b);
   sel.innerHTML = '<option value="TODOS">Todos</option>' + sems.map(s=>`<option value="${s}">${s}° Semestre</option>`).join("");
+  sel.disabled = false;
+}
+function poblarMenciones(){
+  const wrap = document.getElementById("fieldMencion");
+  const sel = document.getElementById("selMencion");
+  if(!wrap || !sel) return;
+  if(!MALLA || !MALLA.mencionesList || !MALLA.mencionesList.length){
+    wrap.style.display = "none";
+    sel.innerHTML = '<option value="">—</option>';
+    sel.disabled = true;
+    return;
+  }
+  wrap.style.display = "";
+  sel.innerHTML = '<option value="">(sin mención / tronco común)</option>'
+    + MALLA.mencionesList.map(m=>`<option value="${m}">${m}</option>`).join("");
   sel.disabled = false;
 }
 
@@ -1424,6 +1604,7 @@ setupDrop("dropData","fileData", async file=>{
     document.getElementById("dropData").classList.add("ok");
     document.getElementById("chipData").textContent = file.name;
     poblarProgramas();
+    poblarRangos();
     actualizarBoton();
     document.getElementById("hint").textContent = MALLA
       ? "Listo. Elige programa y semestre, y genera."
@@ -1445,14 +1626,18 @@ setupDrop("dropMalla","fileMalla", async file=>{
     if(m) PROG_AUTO = m[0].toUpperCase();
     document.getElementById("dropMalla").classList.add("ok");
     document.getElementById("chipMalla").textContent = file.name;
+    poblarMenciones();
     if(DATA_ROWS){ poblarProgramas(); }
-    toast("Malla cargada: filtro por semestre habilitado.");
+    toast(MALLA.mencionesList.length
+      ? `Malla cargada: filtro por semestre y mención habilitado (${MALLA.mencionesList.length} menciones detectadas).`
+      : "Malla cargada: filtro por semestre habilitado.");
   }catch(e){
     toast(e.message, true);
   }
 });
 
 document.getElementById("selProg").onchange = poblarSemestres;
+document.getElementById("selMencion").onchange = poblarSemestres;
 document.getElementById("btnGen").onclick = generar;
 document.getElementById("btnExport").onclick = exportarExcel;
 cargarContador();
